@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 import pydeck as pdk
 
-# Note: The original file path DATA_DIR is kept but commented out as it's not used.
+# Lưu ý: Phiên bản này loại bỏ việc tải file .zarr
 # DATA_DIR = r"C:\Users\Victus\Downloads\Conference"
 # CURR_ZARR = os.path.join(DATA_DIR, "curr1.zarr")
 
@@ -32,7 +32,7 @@ AUTO_OFFSHORE_STEP_M   = 500.0
 MIN_START_SPEED        = 0.05  # Minimum velocity required to start (avoid dead zones)
 
 # ---- Start Beaches (Optimized Coordinates) ----
-# Using representative center points for simulation purposes
+# Sử dụng các điểm trung tâm đại diện cho mục đích mô phỏng
 TAIWAN_BEACHING_SITES = {
     "North - Keelung/Yehliu": (121.70, 25.20),
     "East - Hualien":         (121.65, 23.90),
@@ -65,8 +65,7 @@ def haversine(lon1, lat1, lon2, lat2):
     return R*2*np.arctan2(np.sqrt(a), np.sqrt(1-a))
 
 # ---------------- Land (Beaching) - SIMPLIFIED/REMOVED ----------------
-# NOTE: The complex GeoPandas logic is removed for lightweight cloud deployment.
-# These functions are kept as stubs to maintain the original code structure.
+# Logic kiểm tra đất liền phức tạp đã bị loại bỏ cho phiên bản Cloud nhẹ
 def is_land(lon, lat):
     return False
 
@@ -74,25 +73,25 @@ def check_beach(lon_arr, lat_arr):
     return np.zeros_like(np.asarray(lon_arr, dtype=bool))
 
 # ---------------- MOCK VELOCITY PROVIDER ----------------
-# This section replaces the Zarr/Xarray loading logic (build_velocity_providers)
+# Phần này thay thế logic tải Zarr bằng một mô hình toán học đơn giản
 @st.cache_data(show_spinner=False)
 def get_mock_velocity(lon, lat):
-    """Simulates a velocity field (U, V in m/s) based on position."""
+    """Mô phỏng trường vận tốc (U, V tính bằng m/s) dựa trên vị trí."""
     lon = np.asarray(lon, dtype="float64")
     lat = np.asarray(lat, dtype="float64")
     
-    # Base Current (Northward Kuroshio-like flow)
+    # Dòng chảy cơ bản (Giống Kuroshio hướng Bắc)
     v_base = 0.5 + 0.5 * (lon - 120.0) / 2.0
     u_base = 0.1 - 0.2 * (lon - 120.0) / 2.0 
     
-    # Add small spatial variability
+    # Thêm biến thiên không gian nhỏ
     noise_u = np.sin(lat * 8) * 0.1 * np.cos(lon * 5)
     noise_v = np.cos(lon * 7) * 0.1 * np.sin(lat * 6)
     
     u = u_base + noise_u
     v = v_base + noise_v
     
-    # Apply speed cap
+    # Áp dụng giới hạn tốc độ
     spd = np.hypot(u, v)
     over = spd > SPEED_CAP_MPS
     if np.any(over):
@@ -100,30 +99,29 @@ def get_mock_velocity(lon, lat):
         u = np.where(over, u*scale, u)
         v = np.where(over, v*scale, v)
 
-    # Apply minimum speed check
+    # Áp dụng kiểm tra tốc độ tối thiểu
     slow = spd < MIN_START_SPEED
     if np.any(slow):
         u[slow] = 0.0
         v[slow] = 0.0
         
-    # Mock provider structure for compatibility
+    # Cấu trúc nhà cung cấp giả để tương thích với các hàm khác
     mock_provider = {
         "curr": {
-            "u": np.array([u]), # 1 time slice
-            "v": np.array([v]), # 1 time slice
-            "bbox": (118.0, 125.0, 20.0, 27.0) # Mock bounding box
+            "u": np.array([u]), # 1 lát thời gian
+            "v": np.array([v]), # 1 lát thời gian
+            "bbox": (118.0, 125.0, 20.0, 27.0) # Khung giới hạn giả
         }
     }
     return u, v, mock_provider
 
 # ---------------- Interpolation & Time Logic - SIMPLIFIED ----------------
-# The actual interpolation is now handled by the mock function's vector math.
 def get_velocity(lon_arr, lat_arr, prov, hours_elapsed):
-    """Retrieves velocity from the mock provider (ignoring time interpolation)."""
-    # Since the mock data is stationary (no time variation), we call the mock calculation directly.
+    """Truy xuất vận tốc từ nhà cung cấp giả (bỏ qua nội suy thời gian)."""
+    # Vì dữ liệu giả là tĩnh, chúng ta gọi hàm tính toán giả trực tiếp.
     uc, vc, _ = get_mock_velocity(lon_arr, lat_arr)
     
-    # Recalculate speed cap check for the final step velocity
+    # Tính toán lại giới hạn tốc độ cho bước vận tốc cuối cùng
     spd = np.hypot(uc, vc)
     over = spd > SPEED_CAP_MPS
     if np.any(over):
@@ -134,11 +132,10 @@ def get_velocity(lon_arr, lat_arr, prov, hours_elapsed):
     return uc, vc
 
 def rk4_step(lon, lat, dt_seconds, prov, step_idx, total_steps):
-    """Runge-Kutta 4th order integration step."""
+    """Bước tích hợp Runge-Kutta bậc 4."""
     lon = np.asarray(lon, dtype="float64")
     lat = np.asarray(lat, dtype="float64")
     
-    # The original code's call signature is maintained
     hours_elapsed = (step_idx * abs(dt_seconds)) / 3600.0
     
     def get_v(l, la): return get_velocity(l, la, prov, hours_elapsed)
@@ -165,18 +162,16 @@ def rk4_step(lon, lat, dt_seconds, prov, step_idx, total_steps):
     return new_lon, new_lat
 
 # ---------------- Offshore Utilities - SIMPLIFIED ----------------
-# These functions are kept as stubs, only the main RK4 loop uses the BBOX check
 def _inside_bbox(lon, lat, bbox):
     return (bbox[0] <= lon <= bbox[1]) and (bbox[2] <= lat <= bbox[3])
 
 def _valid_water(lon, lat, prov):
-    # Simplified check for mock data
+    # Kiểm tra đơn giản cho dữ liệu giả
     u, v, _ = get_mock_velocity(lon, lat)
     return np.hypot(u, v) >= MIN_START_SPEED
 
 def snap_to_valid_ocean(lon0, lat0, prov, max_km=AUTO_OFFSHORE_START_KM):
-    # In this mock, we assume the starting point is valid if velocity is sufficient
-    # We skip the iterative search for simplicity.
+    # Trong mô hình giả này, chúng ta giả định điểm bắt đầu là hợp lệ nếu vận tốc đủ lớn.
     st.write(f"Using initial point {lon0:.2f}, {lat0:.2f} for simulation.")
     return float(lon0), float(lat0)
 
@@ -188,13 +183,13 @@ def run_backtracking(release_sites, n_particles_per_site, n_steps, dt_minutes, p
 
     nudged_sites = []
     for site_name, lon0, lat0 in release_sites:
-        # snap_to_valid_ocean is now simplified
+        # snap_to_valid_ocean đã được đơn giản hóa
         lon1, lat1 = snap_to_valid_ocean(lon0, lat0, prov) 
         nudged_sites.append((site_name, lon1, lat1))
 
     parts = []
     for site_idx, (site_name, lon0, lat0) in enumerate(nudged_sites):
-        # Scatter particles slightly (2 km radius)
+        # Phân tán các hạt nhẹ (bán kính 2 km)
         rs = np.sqrt(rng.random(n_particles_per_site))*2000.0 
         ang = rng.random(n_particles_per_site)*2*np.pi
         dx, dy = rs*np.cos(ang), rs*np.sin(ang)
@@ -207,7 +202,7 @@ def run_backtracking(release_sites, n_particles_per_site, n_steps, dt_minutes, p
     lon = np.array([p[3] for p in parts], dtype="float64")
     lat = np.array([p[4] for p in parts], dtype="float64")
     pid_list = [p[0] for p in parts]
-    # siteidx_l = [p[1] for p in parts] # Not used downstream
+    # siteidx_l = [p[1] for p in parts] # Không được sử dụng sau này
     sitename_l = [p[2] for p in parts]
 
     active = np.ones(N, dtype=bool)
@@ -218,7 +213,7 @@ def run_backtracking(release_sites, n_particles_per_site, n_steps, dt_minutes, p
     traj_lon[:,0] = lon
     traj_lat[:,0] = lat
 
-    # Mock BBOX
+    # Khung giới hạn giả
     bbox = prov["curr"]["bbox"] 
 
     progress_bar = st.progress(0)
@@ -229,17 +224,17 @@ def run_backtracking(release_sites, n_particles_per_site, n_steps, dt_minutes, p
 
             oob = (new_lon < bbox[0]) | (new_lon > bbox[1]) | (new_lat < bbox[2]) | (new_lat > bbox[3])
             if np.any(oob):
-                # Stop OOB particles, keep last valid position
+                # Dừng các hạt OOB, giữ vị trí hợp lệ cuối cùng
                 new_lon[oob] = lon[idx][oob]; new_lat[oob] = lat[idx][oob]
                 status[idx[oob]] = "oob_stop"; active[idx[oob]] = False
 
-            # Land check is now a stub (returns False)
+            # Kiểm tra đất liền hiện là một hàm giả (trả về False)
             land = check_beach(new_lon, new_lat)
             if np.any(land):
                 new_lon[land] = lon[idx][land]; new_lat[land] = lat[idx][land]
                 status[idx[land]] = "beached"; active[idx[land]] = False
 
-            # Update only active, non-OOB/non-land particles
+            # Cập nhật chỉ các hạt đang hoạt động, không OOB/không đất liền
             upd_mask = ~oob & ~land
             lon[idx[upd_mask]] = new_lon[upd_mask]
             lat[idx[upd_mask]] = new_lat[upd_mask]
@@ -253,7 +248,7 @@ def run_backtracking(release_sites, n_particles_per_site, n_steps, dt_minutes, p
 
     rows = []
     base_time = datetime.utcnow()
-    # Use a bigger stride for lightweight CSV/plotting
+    # Sử dụng bước nhảy lớn hơn cho CSV/biểu đồ nhẹ
     step_stride = 5 
     
     for s in range(0, n_steps+1, step_stride):
@@ -282,17 +277,17 @@ with st.sidebar:
     
     n_particles = st.slider("Number of Particles", 10, 500, 50)
     days = st.slider("Backtracking Days", 1, 30, 7)
-    dt_mins = 60 # Fixed step size for mock data 
+    dt_mins = 60 # Kích thước bước cố định cho dữ liệu giả 
     total_steps = int(days * 24 * 60 / dt_mins)
     
     st.info(f"Total Steps: {total_steps} (Step Size: {dt_mins} min)")
     st.info("Mode: Mathematical Simulation (Optimized for Mobile/Cloud)")
 
-# Load Mock Providers (needed for structure, but prov is mostly ignored)
+# Load Mock Providers 
 u_mock, v_mock, providers = get_mock_velocity(init_lon, init_lat)
 
 if st.button("Start Backtracking", use_container_width=True):
-    # Store initial coordinates for later stats
+    # Lưu tọa độ ban đầu để tính toán thống kê sau
     st.session_state["start_coords"] = (init_lon, init_lat)
     
     with st.spinner("Calculating..."):
@@ -334,7 +329,7 @@ if "df" in st.session_state:
         
     avg_direct = np.mean(stats_direct)
     
-    # Stats Summary
+    # Tóm tắt thống kê
     n_local = sum(1 for c in source_results.values() if c[1] == 255)
     n_total = len(source_results)
     ratio_local = (n_local / n_total) * 100 if n_total > 0 else 0
@@ -350,7 +345,7 @@ if "df" in st.session_state:
 
     st.subheader("Trajectory Map")
     pids = df["particle_id"].unique()
-    # Show max 100 particles for smooth mobile rendering
+    # Chỉ hiển thị tối đa 100 hạt để hiển thị trên thiết bị di động mượt mà hơn
     show_pids = np.random.choice(pids, min(len(pids), 100), replace=False) 
     df_show = df[df["particle_id"].isin(show_pids)]
     
@@ -358,11 +353,11 @@ if "df" in st.session_state:
     for pid in show_pids:
         d = df_show[df_show["particle_id"]==pid].sort_values("step_index")
         path = d[["lon", "lat"]].values.tolist()
-        # Use Source Color
+        # Sử dụng Màu nguồn
         p_color = source_results.get(pid, [200, 200, 200, 200])
         paths.append({"path": path, "pid": pid, "color": p_color})
         
-    # Start point data (where the plastic was found)
+    # Dữ liệu điểm bắt đầu (nơi tìm thấy rác thải nhựa)
     starts = pd.DataFrame([{"lon": start_lon, "lat": start_lat}])
     
     layer_path = pdk.Layer(
@@ -372,7 +367,7 @@ if "df" in st.session_state:
     )
     layer_scatter = pdk.Layer(
         "ScatterplotLayer", data=starts, get_position=["lon", "lat"],
-        get_color=[255, 100, 0, 255], get_radius=2000 # Larger radius for visibility
+        get_color=[255, 100, 0, 255], get_radius=2000 # Bán kính lớn hơn để dễ nhìn
     )
     
     view_state = pdk.ViewState(
@@ -386,3 +381,4 @@ if "df" in st.session_state:
     ))
     
     st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), "traj.csv")
+
