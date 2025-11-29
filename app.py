@@ -47,6 +47,15 @@ LOCAL_BOX = {
     "lat_min": 21.5,  "lat_max": 25.8
 }
 
+# ----- Taiwan land-box (simple mask to prevent tracks entering island) -----
+TAIWAN_LAND_BOX = {
+    "lon_min": 119.8, "lon_max": 122.2,
+    "lat_min": 21.7,  "lat_max": 25.5
+}
+# Center point of Taiwan box (used to push particles outward)
+TAIWAN_CENTER = ((TAIWAN_LAND_BOX["lon_min"] + TAIWAN_LAND_BOX["lon_max"]) / 2.0,
+                 (TAIWAN_LAND_BOX["lat_min"] + TAIWAN_LAND_BOX["lat_max"]) / 2.0)
+
 # ---------------- Math Tools ----------------
 def meters_to_deg_lon(m, lat):
     return m / (METERS_PER_DEG_LAT * np.cos(np.deg2rad(lat)) + 1e-12)
@@ -67,10 +76,23 @@ def haversine(lon1, lat1, lon2, lat2):
 # ---------------- Land (Beaching) - SIMPLIFIED/REMOVED ----------------
 # Logic kiểm tra đất liền phức tạp đã bị loại bỏ cho phiên bản Cloud nhẹ
 def is_land(lon, lat):
-    return False
+    """
+    Simple Taiwan land mask: returns boolean array (or scalar) True if point inside Taiwan box.
+    This prevents tracks from entering the island area defined by TAIWAN_LAND_BOX.
+    """
+    lon_a = np.asarray(lon, dtype="float64")
+    lat_a = np.asarray(lat, dtype="float64")
+    inside = (
+        (lon_a >= TAIWAN_LAND_BOX["lon_min"]) &
+        (lon_a <= TAIWAN_LAND_BOX["lon_max"]) &
+        (lat_a >= TAIWAN_LAND_BOX["lat_min"]) &
+        (lat_a <= TAIWAN_LAND_BOX["lat_max"])
+    )
+    return inside
 
 def check_beach(lon_arr, lat_arr):
-    return np.zeros_like(np.asarray(lon_arr, dtype=bool))
+    # For compatibility: use is_land (previous implementation returned zeros).
+    return is_land(lon_arr, lat_arr)
 
 # ---------------- MOCK VELOCITY PROVIDER ----------------
 # Phần này thay thế logic tải Zarr bằng một mô hình toán học đơn giản
@@ -228,14 +250,37 @@ def run_backtracking(release_sites, n_particles_per_site, n_steps, dt_minutes, p
                 new_lon[oob] = lon[idx][oob]; new_lat[oob] = lat[idx][oob]
                 status[idx[oob]] = "oob_stop"; active[idx[oob]] = False
 
-            # Kiểm tra đất liền hiện là một hàm giả (trả về False)
-            land = check_beach(new_lon, new_lat)
+            # Kiểm tra nếu đi vào Taiwan land box
+            land = is_land(new_lon, new_lat)
             if np.any(land):
-                new_lon[land] = lon[idx][land]; new_lat[land] = lat[idx][land]
-                status[idx[land]] = "beached"; active[idx[land]] = False
+                # Đẩy các hạt ra ngoài: push theo vector từ trung tâm Taiwan ra phía ngoài
+                land_idx_local = np.where(land)[0]  # indices in the sliced idx array
+                # Lấy lon/lat hiện hành tương ứng
+                cur_lon = lon[idx][land_idx_local]
+                cur_lat = lat[idx][land_idx_local]
+                # Vector từ trung tâm đảo đến hạt
+                vec_lon = cur_lon - TAIWAN_CENTER[0]
+                vec_lat = cur_lat - TAIWAN_CENTER[1]
+                # Chuẩn hoá vector
+                mag = np.hypot(vec_lon, vec_lat) + 1e-12
+                nv_lon = vec_lon / mag
+                nv_lat = vec_lat / mag
+                # Khoảng đẩy (m): ngẫu nhiên nhỏ để tạo đường cong khác nhau
+                base_push_m = 5000.0  # đẩy ~5 km mỗi khi va chạm
+                rand_push = base_push_m * (1.0 + 0.5 * rng.random(len(land_idx_local)))
+                # Chuyển thành độ
+                deg_dlon = meters_to_deg_lon(rand_push, cur_lat)
+                deg_dlat = meters_to_deg_lat(rand_push)
+                # Áp dụng đẩy (ra ngoài)
+                new_lon[land_idx_local] = cur_lon + nv_lon * deg_dlon
+                new_lat[land_idx_local] = cur_lat + nv_lat * deg_dlat
+                # Đánh dấu và tiếp tục (không dừng hạt)
+                status[idx[land_idx_local]] = "avoid_land"
+                # ensure particle remains active so it continues to be advected
+                active[idx[land_idx_local]] = True
 
-            # Cập nhật chỉ các hạt đang hoạt động, không OOB/không đất liền
-            upd_mask = ~oob & ~land
+            # Cập nhật chỉ các hạt đang hoạt động, không OOB (chú ý: land đã được xử lý trên)
+            upd_mask = ~oob
             lon[idx[upd_mask]] = new_lon[upd_mask]
             lat[idx[upd_mask]] = new_lat[upd_mask]
         
@@ -349,12 +394,22 @@ if "df" in st.session_state:
     show_pids = np.random.choice(pids, min(len(pids), 100), replace=False) 
     df_show = df[df["particle_id"].isin(show_pids)]
     
+    # Color map per site
+    color_map = {
+        "North - Keelung/Yehliu":  [50, 200, 255, 220],
+        "East - Hualien":          [255, 150, 50, 220],
+        "East - Taitung":          [255, 50, 200, 220],
+        "South - Kaohsiung":       [50, 255, 120, 220],
+        "West - Hsinchu":          [255, 80, 80, 220]
+    }
+    
     paths = []
     for pid in show_pids:
         d = df_show[df_show["particle_id"]==pid].sort_values("step_index")
         path = d[["lon", "lat"]].values.tolist()
-        # Sử dụng Màu nguồn
-        p_color = source_results.get(pid, [200, 200, 200, 200])
+        # Sử dụng màu theo site_name
+        sitename = d["site_name"].iloc[0] if "site_name" in d.columns else ""
+        p_color = color_map.get(sitename, source_results.get(pid, [200,200,200,200]))
         paths.append({"path": path, "pid": pid, "color": p_color})
         
     # Dữ liệu điểm bắt đầu (nơi tìm thấy rác thải nhựa)
@@ -381,4 +436,3 @@ if "df" in st.session_state:
     ))
     
     st.download_button("Download CSV", df.to_csv(index=False).encode("utf-8"), "traj.csv")
-
